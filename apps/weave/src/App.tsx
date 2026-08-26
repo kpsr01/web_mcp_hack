@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { authorizeOpaqueClaim, createGrant, demoClaimDescriptors, issueOpaqueClaimHandles, isGrantActive, readGrantedClaim } from "@weave/passport";
 import type { OpaqueClaimHandle } from "@weave/passport";
-import type { ClaimPredicate, GrantRequest, MiniPassportGrant, ProviderKind, WorkspaceConstraint, WorkspaceManifest } from "@weave/protocol";
+import type { ClaimPredicate, GrantRequest, MiniPassportGrant, ProviderKind, WorkspaceManifest } from "@weave/protocol";
 import { executeWebMCPTool, getWebMCPTools, hasWebMCP, registerWebMCPTool, subscribeWebMCPToolChanges } from "@weave/webmcp";
 import type { RegisteredWebMCPTool } from "@weave/webmcp";
+import { createWorkspaceManifest, summarizeProviderResult } from "./contracts";
 
 const providerOrigins = {
   housing: import.meta.env.VITE_HOUSING_ORIGIN ?? "http://localhost:3101",
@@ -20,43 +21,6 @@ const capabilityOrigins = [
 
 type DiscoveryState = "loading" | "ready" | "unsupported" | "error";
 type GrantResolver = (result: Record<string, unknown>) => void;
-function createDefaultConstraints(): WorkspaceConstraint[] {
-  return [
-    { id: "monthly_budget", label: "Monthly housing budget", type: "number", value: 180000, unit: "JPY" },
-    { id: "max_commute", label: "Maximum commute", type: "number", value: 45, unit: "minutes" },
-    { id: "furnished", label: "Furnished home", type: "boolean", value: true },
-  ];
-}
-
-function normalizeConstraints(value: unknown): WorkspaceConstraint[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (!item || typeof item !== "object") return [];
-    const candidate = item as Record<string, unknown>;
-    const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
-    const label = typeof candidate.label === "string" ? candidate.label.trim() : "";
-    const type = candidate.type;
-    if (!id || !label || (type !== "text" && type !== "number" && type !== "boolean")) return [];
-
-    let normalizedValue: string | number | boolean;
-    if (type === "number") {
-      const numberValue = typeof candidate.value === "number" ? candidate.value : Number(candidate.value);
-      if (!Number.isFinite(numberValue)) return [];
-      normalizedValue = numberValue;
-    } else if (type === "boolean") {
-      if (typeof candidate.value === "boolean") normalizedValue = candidate.value;
-      else if (candidate.value === "true") normalizedValue = true;
-      else if (candidate.value === "false") normalizedValue = false;
-      else return [];
-    } else {
-      if (!["string", "number", "boolean"].includes(typeof candidate.value)) return [];
-      normalizedValue = String(candidate.value);
-    }
-
-    const unit = typeof candidate.unit === "string" ? candidate.unit.trim() : "";
-    return [{ id, label, type, value: normalizedValue, ...(unit ? { unit } : {}) }];
-  });
-}
 
 function schemaParameterNames(tool: RegisteredWebMCPTool): string {
   let schema = tool.inputSchema;
@@ -111,12 +75,6 @@ function grantModeLabel(mode: MiniPassportGrant["mode"]): string {
   return "PROVE · predicate only";
 }
 
-function summarizeProviderResult(result: unknown): Record<string, unknown> {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return { status: "completed" };
-  const record = result as Record<string, unknown>;
-  const allowed = ["status", "code", "applicationId", "accountId", "accessMode", "claimUsed", "proof", "privacy"];
-  return Object.fromEntries(allowed.filter((key) => key in record).map((key) => [key, record[key]]));
-}
 
 function updatePendingClaim(request: GrantRequest, claimId: string): GrantRequest {
   const claimIds = request.claimIds.includes(claimId)
@@ -278,30 +236,13 @@ export function App() {
           additionalProperties: false,
         },
         execute: async (input) => {
-          const title = String(input.title);
-          const goal = String(input.goal);
           const current = workspaceRef.current;
-          const requestedConstraints = normalizeConstraints(input.constraints);
-          const constraints = requestedConstraints.length
-            ? requestedConstraints
-            : current?.goal === goal && current.constraints?.length
-              ? current.constraints
-              : createDefaultConstraints();
-          const manifest: WorkspaceManifest = {
-            id: `workspace_${crypto.randomUUID()}`,
-            title,
-            goal,
-            summary: input.summary ? String(input.summary) : undefined,
-            constraints,
-            sections: (input.sections as WorkspaceManifest["sections"]).map((section) => ({
-              ...section,
-              id: section.id ?? `section_${crypto.randomUUID()}`,
-            })),
-          };
+          const manifest = createWorkspaceManifest(input, current);
+          if (!manifest) return { status: "rejected", code: "INVALID_WORKSPACE_MANIFEST" };
           workspaceRef.current = manifest;
           setWorkspace(manifest);
           setAudit((items) => [`Workspace composed: ${manifest.title}`, ...items]);
-          return { status: "created", workspaceId: manifest.id, sectionCount: manifest.sections.length, constraints };
+          return { status: "created", workspaceId: manifest.id, sectionCount: manifest.sections.length, constraints: manifest.constraints };
         },
       }),
       registerWebMCPTool({

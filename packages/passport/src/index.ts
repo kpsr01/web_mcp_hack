@@ -94,6 +94,9 @@ export function authorizeOpaqueClaim(
     return { status: "error", code: "GRANT_SCOPE_VIOLATION" };
   }
   if (grant.mode !== input.mode) return { status: "error", code: "GRANT_MODE_VIOLATION" };
+  const descriptor = demoClaimDescriptors.find((claim) => claim.id === handle.claimId);
+  if (!descriptor) return { status: "error", code: "CLAIM_UNAVAILABLE" };
+  if (!descriptor.allowedModes.includes(input.mode)) return { status: "error", code: "GRANT_MODE_VIOLATION" };
 
   const value = readDemoClaimValue(handle.claimId);
   if (value === undefined) return { status: "error", code: "CLAIM_UNAVAILABLE" };
@@ -140,5 +143,11 @@ export function readGrantedClaim(
   if (grant.audience !== input.audience || !grant.claimIds.includes(input.claimId)) {
     return { status: "error", code: "GRANT_SCOPE_VIOLATION" };
   }
-  return { claimId: input.claimId, value: readDemoClaimValue(input.claimId) };
+  const descriptor = demoClaimDescriptors.find((claim) => claim.id === input.claimId);
+  if (!descriptor) return { status: "error", code: "CLAIM_UNAVAILABLE" };
+  if (!descriptor.allowedModes.includes("reveal")) return { status: "error", code: "GRANT_MODE_VIOLATION" };
+  const value = readDemoClaimValue(input.claimId);
+  return value === undefined
+    ? { status: "error", code: "CLAIM_UNAVAILABLE" }
+    : { claimId: input.claimId, value };
 }

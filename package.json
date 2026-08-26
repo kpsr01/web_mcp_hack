@@ -11,7 +11,8 @@
     "dev:civic": "pnpm --filter @weave/provider dev:civic",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm -r --if-present test"
+    "test:evals": "node --test evals/evals.test.mjs",
+    "test": "pnpm test:evals && pnpm -r --if-present test"
   },
   "devDependencies": {
     "concurrently": "^9.2.0",

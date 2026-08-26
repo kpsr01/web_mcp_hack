@@ -107,3 +107,63 @@ test("prove handles return predicates and reject scope, mode, revocation, and ex
     { status: "error", code: "GRANT_EXPIRED" },
   );
 });
+test("grant expiry is exclusive and unknown handles never authorize", () => {
+  const expiring = grant({ expiresAt: "2025-01-01T00:01:00.000Z" });
+  assert.equal(isGrantActive(expiring, new Date("2025-01-01T00:00:59.999Z")), true);
+  assert.equal(isGrantActive(expiring, new Date("2025-01-01T00:01:00.000Z")), false);
+  assert.deepEqual(
+    authorizeOpaqueClaim([grant({ mode: "use" })], [], { handleId: "missing", audience: "housing", mode: "use" }, now),
+    { status: "error", code: "GRANT_REQUIRED" },
+  );
+  assert.deepEqual(
+    readGrantedClaim([], { grantId: "missing", claimId: "preferences.diet", audience: "housing" }, now),
+    { status: "error", code: "GRANT_REQUIRED" },
+  );
+});
+
+test("grant boundaries enforce claim mode and claim availability", () => {
+  const revealDate = grant({ claimIds: ["identity.date_of_birth"] });
+  assert.deepEqual(
+    readGrantedClaim([revealDate], { grantId: revealDate.grantId, claimId: "identity.date_of_birth", audience: "housing" }, now),
+    { status: "error", code: "GRANT_MODE_VIOLATION" },
+  );
+
+  const useUnknown = grant({ grantId: "grant_unknown", claimIds: ["secret.unknown"], mode: "use" });
+  const [unknownHandle] = issueOpaqueClaimHandles(useUnknown);
+  assert.deepEqual(
+    authorizeOpaqueClaim([useUnknown], [unknownHandle], { handleId: unknownHandle.handleId, audience: "housing", mode: "use" }, now),
+    { status: "error", code: "CLAIM_UNAVAILABLE" },
+  );
+  const [unknownRevealHandle] = issueOpaqueClaimHandles({ ...useUnknown, mode: "reveal" });
+  assert.deepEqual(
+    readGrantedClaim([{ ...useUnknown, mode: "reveal" }], { grantId: useUnknown.grantId, claimId: unknownRevealHandle.claimId, audience: "housing" }, now),
+    { status: "error", code: "CLAIM_UNAVAILABLE" },
+  );
+});
+
+test("predicates are claim-specific and return only proof results", () => {
+  const budgetGrant = grant({
+    grantId: "grant_budget",
+    claimIds: ["financial.monthly_housing_budget"],
+    audience: "bank",
+    mode: "prove",
+  });
+  const [budgetHandle] = issueOpaqueClaimHandles(budgetGrant);
+  const budgetInput = { handleId: budgetHandle.handleId, audience: "bank", mode: "prove" as const };
+  assert.deepEqual(
+    authorizeOpaqueClaim([budgetGrant], [budgetHandle], { ...budgetInput, predicate: { kind: "numberAtLeast", value: 180000 } }, now),
+    { status: "authorized", claimId: "financial.monthly_housing_budget", proof: true },
+  );
+  assert.deepEqual(
+    authorizeOpaqueClaim([budgetGrant], [budgetHandle], { ...budgetInput, predicate: { kind: "numberAtLeast", value: 180001 } }, now),
+    { status: "authorized", claimId: "financial.monthly_housing_budget", proof: false },
+  );
+  assert.deepEqual(
+    authorizeOpaqueClaim([budgetGrant], [budgetHandle], { ...budgetInput, predicate: { kind: "ageAtLeast", value: 18 } }, now),
+    { status: "error", code: "INVALID_PREDICATE" },
+  );
+  assert.deepEqual(
+    authorizeOpaqueClaim([budgetGrant], [budgetHandle], { ...budgetInput, predicate: { kind: "present" } }, now),
+    { status: "authorized", claimId: "financial.monthly_housing_budget", proof: true },
+  );
+});
