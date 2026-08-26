@@ -44,6 +44,8 @@ The consent UI lets the human remove claims or shorten duration before approval.
 
 The agent may read the actual value for the duration/scope of the grant. Use only for values where direct reasoning benefits outweigh privacy cost, e.g. dietary preference or a non-sensitive budget preference.
 
+Phase 2 reads also require the exact grant audience and fail after revocation or expiry, for claims outside the grant, or for non-`reveal` modes.
+
 ### Use
 
 The agent receives an opaque handle and may pass it into a compatible provider operation. WEAVE resolves the real value at execution time. The model should not receive the raw value.
@@ -75,7 +77,9 @@ Every state transition enters the local audit trail.
 
 A grant is necessary but not sufficient for a consequential action. Provider-specific business validation still applies.
 
-Opaque handles should encode no secret value. For the prototype they can be random UUIDs mapped to a local in-memory/IndexedDB record.
+Use/prove handles are opaque random identifiers. The broker validates the handle's grant, audience, claim scope, mode, expiry, and revocation at execution time. Providers repeat that validation before a consequential action; they receive the selected value only in `use` mode and receive a predicate result only in `prove` mode.
+
+Phase 3 supports only `ageAtLeast`, `numberAtLeast`, and `present` predicates. Opaque handles should encode no secret value. For the prototype they can be random UUIDs mapped to a local in-memory/IndexedDB record.
 
 ## Agent-visible grant result
 
@@ -85,11 +89,14 @@ Approved grant output should contain only metadata:
 {
   "status": "approved",
   "grantId": "grant_...",
-  "claims": ["preferences.diet"],
+  "claimIds": ["credentials.passport_number"],
+  "claimHandles": ["claim_..."],
   "mode": "use",
   "expiresAt": "..."
 }
 ```
+
+`claimHandles` are returned for `use` and `prove` grants. They authorize compatible provider operations but never reveal claim values to the agent. Reveal grants may return no handles and remain the only mode supported by `weave_read_granted_claim`.
 
 No values in `use` or `prove` modes.
 

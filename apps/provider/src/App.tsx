@@ -14,8 +14,14 @@ export function App() {
       onError: (error) => setLastAction(`Registration error: ${String(error)}`),
     }));
     const onAction = (event: Event) => {
-      const detail = (event as CustomEvent<{ tool: string }>).detail;
-      setLastAction(`Tool executed: ${detail.tool}`);
+      const detail = (event as CustomEvent<{ tool: string; result?: unknown }>).detail;
+      const result = detail.result && typeof detail.result === "object" && !Array.isArray(detail.result)
+        ? detail.result as Record<string, unknown>
+        : {};
+      const status = typeof result.status === "string" ? ` · ${result.status}` : "";
+      const code = typeof result.code === "string" ? ` · ${result.code}` : "";
+      const privacy = typeof result.privacy === "string" ? ` · ${result.privacy}` : "";
+      setLastAction(`Tool executed: ${detail.tool}${status}${code}${privacy}`);
     };
     window.addEventListener("weave-provider-action", onAction);
     return () => { cleanups.forEach((cleanup) => cleanup()); window.removeEventListener("weave-provider-action", onAction); };

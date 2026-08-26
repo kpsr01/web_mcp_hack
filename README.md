@@ -66,7 +66,7 @@ The provider apps are deliberately separate origins. Each registers WebMCP tools
 
 ## Current phase
 
-The repository is initialized for **Phase 0 / Phase 1**. The scaffold includes typed WebMCP registration, provider simulators, Passport claim metadata, grant-request UI, and a typed workspace manifest. See [docs/ROADMAP.md](docs/ROADMAP.md) for acceptance tests before moving between phases.
+Phase 1 is complete: WEAVE discovers cross-origin WebMCP capabilities, renders the live Capability Graph, and composes an editable typed Canvas. See [docs/ROADMAP.md](docs/ROADMAP.md) for the next phase gate.
 
 ## Hackathon constraints baked into the plan
 

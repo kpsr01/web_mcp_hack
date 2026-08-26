@@ -1,6 +1,10 @@
 export type ClaimCategory = "identity" | "credential" | "preference" | "financial" | "location";
 export type ClaimSensitivity = "low" | "medium" | "high";
 export type ClaimAccessMode = "reveal" | "use" | "prove";
+export type ClaimPredicate =
+  | { kind: "ageAtLeast"; value: number }
+  | { kind: "numberAtLeast"; value: number }
+  | { kind: "present" };
 
 export interface ClaimDescriptor {
   id: string;
@@ -39,11 +43,22 @@ export interface WorkspaceSection {
   status?: "idle" | "ready" | "blocked" | "complete";
 }
 
+export type WorkspaceConstraintType = "text" | "number" | "boolean";
+
+export interface WorkspaceConstraint {
+  id: string;
+  label: string;
+  type: WorkspaceConstraintType;
+  value: string | number | boolean;
+  unit?: string;
+}
+
 export interface WorkspaceManifest {
   id: string;
   title: string;
   goal: string;
   summary?: string;
+  constraints?: WorkspaceConstraint[];
   sections: WorkspaceSection[];
 }
 

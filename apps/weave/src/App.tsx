@@ -1,25 +1,224 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createGrant, demoClaimDescriptors, isGrantActive, readDemoClaimValue } from "@weave/passport";
-import type { GrantRequest, MiniPassportGrant, WorkspaceManifest } from "@weave/protocol";
-import { hasWebMCP, registerWebMCPTool } from "@weave/webmcp";
+import { authorizeOpaqueClaim, createGrant, demoClaimDescriptors, issueOpaqueClaimHandles, isGrantActive, readGrantedClaim } from "@weave/passport";
+import type { OpaqueClaimHandle } from "@weave/passport";
+import type { ClaimPredicate, GrantRequest, MiniPassportGrant, ProviderKind, WorkspaceConstraint, WorkspaceManifest } from "@weave/protocol";
+import { executeWebMCPTool, getWebMCPTools, hasWebMCP, registerWebMCPTool, subscribeWebMCPToolChanges } from "@weave/webmcp";
+import type { RegisteredWebMCPTool } from "@weave/webmcp";
 
 const providerOrigins = {
   housing: import.meta.env.VITE_HOUSING_ORIGIN ?? "http://localhost:3101",
   bank: import.meta.env.VITE_BANK_ORIGIN ?? "http://localhost:3102",
   civic: import.meta.env.VITE_CIVIC_ORIGIN ?? "http://localhost:3103",
 };
+const weaveOrigin = import.meta.env.VITE_WEAVE_ORIGIN ?? (typeof window === "undefined" ? "http://localhost:3000" : window.location.origin);
+const capabilityOrigins = [
+  { label: "WEAVE", origin: weaveOrigin },
+  { label: "HOUSING", origin: providerOrigins.housing },
+  { label: "BANK", origin: providerOrigins.bank },
+  { label: "CIVIC", origin: providerOrigins.civic },
+];
 
+type DiscoveryState = "loading" | "ready" | "unsupported" | "error";
 type GrantResolver = (result: Record<string, unknown>) => void;
+function createDefaultConstraints(): WorkspaceConstraint[] {
+  return [
+    { id: "monthly_budget", label: "Monthly housing budget", type: "number", value: 180000, unit: "JPY" },
+    { id: "max_commute", label: "Maximum commute", type: "number", value: 45, unit: "minutes" },
+    { id: "furnished", label: "Furnished home", type: "boolean", value: true },
+  ];
+}
+
+function normalizeConstraints(value: unknown): WorkspaceConstraint[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const candidate = item as Record<string, unknown>;
+    const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+    const label = typeof candidate.label === "string" ? candidate.label.trim() : "";
+    const type = candidate.type;
+    if (!id || !label || (type !== "text" && type !== "number" && type !== "boolean")) return [];
+
+    let normalizedValue: string | number | boolean;
+    if (type === "number") {
+      const numberValue = typeof candidate.value === "number" ? candidate.value : Number(candidate.value);
+      if (!Number.isFinite(numberValue)) return [];
+      normalizedValue = numberValue;
+    } else if (type === "boolean") {
+      if (typeof candidate.value === "boolean") normalizedValue = candidate.value;
+      else if (candidate.value === "true") normalizedValue = true;
+      else if (candidate.value === "false") normalizedValue = false;
+      else return [];
+    } else {
+      if (!["string", "number", "boolean"].includes(typeof candidate.value)) return [];
+      normalizedValue = String(candidate.value);
+    }
+
+    const unit = typeof candidate.unit === "string" ? candidate.unit.trim() : "";
+    return [{ id, label, type, value: normalizedValue, ...(unit ? { unit } : {}) }];
+  });
+}
+
+function schemaParameterNames(tool: RegisteredWebMCPTool): string {
+  let schema = tool.inputSchema;
+  if (typeof schema === "string") {
+    try {
+      schema = JSON.parse(schema) as Record<string, unknown>;
+    } catch {
+      return "No parameters";
+    }
+  }
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== "object") return "No parameters";
+  const names = Object.keys(properties);
+  return names.length ? names.join(", ") : "No parameters";
+}
+
+function isGrantMode(value: unknown): value is GrantRequest["mode"] {
+  return value === "reveal" || value === "use" || value === "prove";
+}
+
+function isGrantRequestShapeValid(request: GrantRequest): boolean {
+  return request.claimIds.length > 0
+    && Boolean(request.purpose.trim())
+    && Boolean(request.audience.trim())
+    && isGrantMode(request.mode)
+    && Number.isInteger(request.durationSeconds)
+    && request.durationSeconds >= 30
+    && request.durationSeconds <= 3600;
+}
+
+function canApproveRequest(request: GrantRequest): boolean {
+  return isGrantRequestShapeValid(request)
+    && request.claimIds.every((id) => demoClaimDescriptors.some((claim) => claim.id === id && claim.allowedModes.includes(request.mode)));
+}
+
+function normalizePredicate(value: unknown): ClaimPredicate | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.kind === "present") return { kind: "present" };
+  if ((candidate.kind === "ageAtLeast" || candidate.kind === "numberAtLeast")
+    && typeof candidate.value === "number"
+    && Number.isFinite(candidate.value)
+    && candidate.value >= 0) {
+    return { kind: candidate.kind, value: candidate.value };
+  }
+  return undefined;
+}
+
+function grantModeLabel(mode: MiniPassportGrant["mode"]): string {
+  if (mode === "reveal") return "REVEAL · agent sees value";
+  if (mode === "use") return "USE · no reveal";
+  return "PROVE · predicate only";
+}
+
+function summarizeProviderResult(result: unknown): Record<string, unknown> {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return { status: "completed" };
+  const record = result as Record<string, unknown>;
+  const allowed = ["status", "code", "applicationId", "accountId", "accessMode", "claimUsed", "proof", "privacy"];
+  return Object.fromEntries(allowed.filter((key) => key in record).map((key) => [key, record[key]]));
+}
+
+function updatePendingClaim(request: GrantRequest, claimId: string): GrantRequest {
+  const claimIds = request.claimIds.includes(claimId)
+    ? request.claimIds.filter((id) => id !== claimId)
+    : [...request.claimIds, claimId];
+  return { ...request, claimIds };
+}
 
 export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceManifest | null>(null);
+  const [capabilities, setCapabilities] = useState<RegisteredWebMCPTool[]>([]);
+  const [discoveryState, setDiscoveryState] = useState<DiscoveryState>(hasWebMCP() ? "loading" : "unsupported");
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [pendingRequest, setPendingRequest] = useState<GrantRequest | null>(null);
   const [grants, setGrants] = useState<MiniPassportGrant[]>([]);
   const [audit, setAudit] = useState<string[]>([]);
   const resolverRef = useRef<GrantResolver | null>(null);
+  const workspaceRef = useRef<WorkspaceManifest | null>(workspace);
+  const capabilityRefreshRef = useRef<(() => void) | null>(null);
   const grantsRef = useRef(grants);
+  const opaqueHandlesRef = useRef<OpaqueClaimHandle[]>([]);
 
-  useEffect(() => { grantsRef.current = grants; }, [grants]);
+  useEffect(() => { workspaceRef.current = workspace; }, [workspace]);
+
+  useEffect(() => {
+    const providersByOrigin = new Map<string, ProviderKind>(
+      Object.entries(providerOrigins).map(([kind, origin]) => [origin, kind as ProviderKind]),
+    );
+    const respond = (event: MessageEvent, requestId: string, result: Record<string, unknown>) => {
+      (event.source as Window).postMessage({
+        type: "weave-passport-authorization-result",
+        requestId,
+        ...result,
+      }, event.origin);
+    };
+    const onMessage = (event: MessageEvent) => {
+      const providerKind = providersByOrigin.get(event.origin);
+      if (!providerKind || !event.source || !event.data || typeof event.data !== "object") return;
+      const request = event.data as Record<string, unknown>;
+      if (request.type !== "weave-passport-authorize" || typeof request.requestId !== "string" || typeof request.claimHandle !== "string") return;
+      if (request.audience !== providerKind || (request.mode !== "use" && request.mode !== "prove")) {
+        respond(event, request.requestId, { status: "error", code: "GRANT_SCOPE_VIOLATION" });
+        return;
+      }
+      const predicate = request.predicate === undefined ? undefined : normalizePredicate(request.predicate);
+      if (request.predicate !== undefined && !predicate) {
+        respond(event, request.requestId, { status: "error", code: "INVALID_PREDICATE" });
+        return;
+      }
+      const authorization = authorizeOpaqueClaim(
+        grantsRef.current,
+        opaqueHandlesRef.current,
+        {
+          handleId: request.claimHandle,
+          audience: providerKind,
+          mode: request.mode,
+          predicate,
+        },
+      );
+      if (authorization.status === "error") {
+        setAudit((items) => [`Provider authorization blocked: ${authorization.code}`, ...items]);
+        respond(event, request.requestId, authorization);
+        return;
+      }
+      setAudit((items) => [`Provider authorized ${providerKind} ${request.mode} access (${authorization.claimId})`, ...items]);
+      respond(event, request.requestId, authorization);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
+    if (!hasWebMCP()) {
+      setDiscoveryState("unsupported");
+      return;
+    }
+
+    let alive = true;
+    let requestId = 0;
+    const refreshCapabilities = async () => {
+      const currentRequest = ++requestId;
+      try {
+        const tools = await getWebMCPTools(Object.values(providerOrigins));
+        if (!alive || currentRequest !== requestId) return;
+        setCapabilities(tools);
+        setDiscoveryError(null);
+        setDiscoveryState("ready");
+      } catch (error) {
+        if (!alive || currentRequest !== requestId) return;
+        setDiscoveryError(String(error));
+        setDiscoveryState("error");
+      }
+    };
+    capabilityRefreshRef.current = () => { void refreshCapabilities(); };
+    const unsubscribe = subscribeWebMCPToolChanges(() => { void refreshCapabilities(); });
+    void refreshCapabilities();
+    return () => {
+      alive = false;
+      capabilityRefreshRef.current = null;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     const cleanups = [
@@ -42,6 +241,23 @@ export function App() {
             title: { type: "string", description: "Short workspace title." },
             goal: { type: "string", description: "The user's task goal." },
             summary: { type: "string", description: "Optional concise plan summary." },
+            constraints: {
+              type: "array",
+              minItems: 1,
+              maxItems: 8,
+              items: {
+                type: "object",
+                required: ["id", "label", "type", "value"],
+                properties: {
+                  id: { type: "string" },
+                  label: { type: "string" },
+                  type: { type: "string", enum: ["text", "number", "boolean"] },
+                  value: { type: ["string", "number", "boolean"] },
+                  unit: { type: "string" },
+                },
+                additionalProperties: false,
+              },
+            },
             sections: {
               type: "array",
               minItems: 1,
@@ -62,19 +278,30 @@ export function App() {
           additionalProperties: false,
         },
         execute: async (input) => {
+          const title = String(input.title);
+          const goal = String(input.goal);
+          const current = workspaceRef.current;
+          const requestedConstraints = normalizeConstraints(input.constraints);
+          const constraints = requestedConstraints.length
+            ? requestedConstraints
+            : current?.goal === goal && current.constraints?.length
+              ? current.constraints
+              : createDefaultConstraints();
           const manifest: WorkspaceManifest = {
             id: `workspace_${crypto.randomUUID()}`,
-            title: String(input.title),
-            goal: String(input.goal),
+            title,
+            goal,
             summary: input.summary ? String(input.summary) : undefined,
+            constraints,
             sections: (input.sections as WorkspaceManifest["sections"]).map((section) => ({
               ...section,
               id: section.id ?? `section_${crypto.randomUUID()}`,
             })),
           };
+          workspaceRef.current = manifest;
           setWorkspace(manifest);
           setAudit((items) => [`Workspace composed: ${manifest.title}`, ...items]);
-          return { status: "created", workspaceId: manifest.id, sectionCount: manifest.sections.length };
+          return { status: "created", workspaceId: manifest.id, sectionCount: manifest.sections.length, constraints };
         },
       }),
       registerWebMCPTool({
@@ -95,21 +322,96 @@ export function App() {
         },
         execute: async (input) => {
           if (resolverRef.current) return { status: "busy", code: "CONSENT_ALREADY_PENDING" };
-          const requestedIds = (input.claimIds as unknown[]).map(String);
+          const requestedIds = Array.isArray(input.claimIds) ? Array.from(new Set(input.claimIds.map(String))) : [];
           const validIds = requestedIds.filter((id) => demoClaimDescriptors.some((claim) => claim.id === id));
-          if (!validIds.length) return { status: "rejected", code: "UNKNOWN_CLAIMS" };
+          if (!requestedIds.length || validIds.length !== requestedIds.length) return { status: "rejected", code: "UNKNOWN_CLAIMS" };
 
           const request: GrantRequest = {
             requestId: `request_${crypto.randomUUID()}`,
             claimIds: validIds,
-            purpose: String(input.purpose),
-            audience: String(input.audience),
+            purpose: String(input.purpose ?? "").trim(),
+            audience: String(input.audience ?? "").trim(),
             mode: input.mode as GrantRequest["mode"],
             durationSeconds: Number(input.durationSeconds),
           };
+          if (!isGrantRequestShapeValid(request)) return { status: "rejected", code: "INVALID_GRANT_REQUEST" };
           setPendingRequest(request);
           setAudit((items) => [`Consent requested: ${validIds.join(", ")}`, ...items]);
           return new Promise<Record<string, unknown>>((resolve) => { resolverRef.current = resolve; });
+        },
+      }),
+      registerWebMCPTool({
+        name: "weave_start_bank_application",
+        title: "Start bank application privately",
+        description: "Starts the bank application with a scoped Passport use handle or proof predicate. Raw claim values never return to the agent.",
+        inputSchema: {
+          type: "object",
+          required: ["accountId", "claimHandle", "mode"],
+          properties: {
+            accountId: { type: "string" },
+            claimHandle: { type: "string", description: "Opaque handle from an approved use or prove grant." },
+            mode: { type: "string", enum: ["use", "prove"] },
+            predicate: {
+              type: "object",
+              required: ["kind"],
+              properties: {
+                kind: { type: "string", enum: ["ageAtLeast", "numberAtLeast", "present"] },
+                value: { type: "number" },
+              },
+              additionalProperties: false,
+            },
+          },
+          additionalProperties: false,
+        },
+        execute: async (input) => {
+          const mode = input.mode === "use" || input.mode === "prove" ? input.mode : null;
+          const claimHandle = typeof input.claimHandle === "string" ? input.claimHandle : "";
+          const accountId = typeof input.accountId === "string" ? input.accountId : "";
+          if (!mode || !claimHandle || !accountId) return { status: "error", code: "INVALID_SEALED_REQUEST" };
+          const predicate = input.predicate === undefined ? undefined : normalizePredicate(input.predicate);
+          if ((input.predicate !== undefined && !predicate) || (mode === "prove" && !predicate)) {
+            return { status: "error", code: "INVALID_PREDICATE" };
+          }
+
+          const authorization = authorizeOpaqueClaim(
+            grantsRef.current,
+            opaqueHandlesRef.current,
+            { handleId: claimHandle, audience: "bank", mode, predicate },
+          );
+          if (authorization.status === "error") {
+            setAudit((items) => [`Bank application blocked: ${authorization.code}`, ...items]);
+            return authorization;
+          }
+          const expectedClaim = mode === "use" ? "credentials.passport_number" : "identity.date_of_birth";
+          if (authorization.claimId !== expectedClaim) {
+            setAudit((items) => ["Bank application blocked: claim outside action scope", ...items]);
+            return { status: "error", code: "GRANT_SCOPE_VIOLATION" };
+          }
+
+          try {
+            const tools = await getWebMCPTools([providerOrigins.bank]);
+            const providerTool = tools.find((tool) => tool.name === "bank_start_application" && tool.origin === providerOrigins.bank);
+            if (!providerTool) {
+              setAudit((items) => ["Bank application blocked: stale provider capability", ...items]);
+              return { status: "error", code: "STALE_CAPABILITY" };
+            }
+            const result = await executeWebMCPTool(providerTool, {
+              accountId,
+              claimHandle,
+              accessMode: mode,
+              ...(predicate ? { predicate } : {}),
+            });
+            const summary = summarizeProviderResult(result);
+            if (summary.status === "error") {
+              setAudit((items) => [`Bank application blocked: ${String(summary.code ?? "PROVIDER_REJECTED")}`, ...items]);
+              return summary;
+            }
+            setAudit((items) => [`Bank application started privately (${grantModeLabel(mode)})`, ...items]);
+            return { provider: "bank", tool: providerTool.name, ...summary };
+          } catch {
+            setAudit((items) => ["Bank application blocked: provider unavailable", ...items]);
+            return { status: "error", code: "PROVIDER_UNAVAILABLE" };
+          }
         },
       }),
       registerWebMCPTool({
@@ -126,31 +428,71 @@ export function App() {
         description: "Reads one claim only when an active Mini Passport explicitly grants that claim in reveal mode.",
         inputSchema: {
           type: "object",
-          required: ["grantId", "claimId"],
-          properties: { grantId: { type: "string" }, claimId: { type: "string" } },
+          required: ["grantId", "claimId", "audience"],
+          properties: {
+            grantId: { type: "string" },
+            claimId: { type: "string" },
+            audience: { type: "string", description: "Audience named in the active grant." },
+          },
           additionalProperties: false,
         },
         annotations: { readOnlyHint: true },
-        execute: async (input) => {
-          const grant = grantsRef.current.find((item) => item.grantId === String(input.grantId));
-          if (!grant) return { status: "error", code: "GRANT_REQUIRED" };
-          if (!isGrantActive(grant)) return { status: "error", code: grant.revokedAt ? "GRANT_REVOKED" : "GRANT_EXPIRED" };
-          if (grant.mode !== "reveal" || !grant.claimIds.includes(String(input.claimId))) return { status: "error", code: "GRANT_SCOPE_VIOLATION" };
-          return { claimId: String(input.claimId), value: readDemoClaimValue(String(input.claimId)) };
-        },
+        execute: async (input) => readGrantedClaim(grantsRef.current, {
+          grantId: String(input.grantId),
+          claimId: String(input.claimId),
+          audience: String(input.audience),
+        }),
       }),
     ];
     return () => cleanups.forEach((cleanup) => cleanup());
   }, []);
 
+  const capabilityGroups = useMemo(() => {
+    const groups = capabilityOrigins.map((item) => ({ ...item, tools: [] as RegisteredWebMCPTool[] }));
+    const byOrigin = new Map(groups.map((group) => [group.origin, group]));
+    capabilities.forEach((tool) => {
+      const origin = tool.origin ?? "unknown";
+      const group = byOrigin.get(origin);
+      if (group) {
+        group.tools.push(tool);
+      } else {
+        const other = { label: "OTHER ORIGIN", origin, tools: [tool] };
+        groups.push(other);
+        byOrigin.set(origin, other);
+      }
+    });
+    return groups;
+  }, [capabilities]);
+
   const activeGrants = useMemo(() => grants.filter((grant) => isGrantActive(grant)), [grants]);
 
+  function updateConstraint(id: string, value: string | number | boolean) {
+    const current = workspaceRef.current;
+    const constraint = current?.constraints?.find((item) => item.id === id);
+    if (!current || !constraint) return;
+    const next = {
+      ...current,
+      constraints: current.constraints?.map((item) => item.id === id ? { ...item, value } : item),
+    };
+    workspaceRef.current = next;
+    setWorkspace(next);
+    setAudit((items) => [`Human constraint updated: ${constraint.label}`, ...items]);
+  }
+
   function approveRequest() {
-    if (!pendingRequest || !resolverRef.current) return;
+    if (!pendingRequest || !resolverRef.current || !canApproveRequest(pendingRequest)) return;
     const grant = createGrant(pendingRequest);
-    setGrants((items) => [grant, ...items]);
+    const handles = grant.mode === "reveal" ? [] : issueOpaqueClaimHandles(grant);
+    opaqueHandlesRef.current = [...opaqueHandlesRef.current, ...handles];
+    const nextGrants = [grant, ...grantsRef.current];
+    grantsRef.current = nextGrants;
+    setGrants(nextGrants);
     setAudit((items) => [`Mini Passport approved: ${grant.grantId}`, ...items]);
-    resolverRef.current({ status: "approved", ...grant });
+    resolverRef.current({
+      status: "approved",
+      ...grant,
+      ...(handles.length ? { claimHandles: handles.map((handle) => handle.handleId) } : {}),
+    });
     resolverRef.current = null;
     setPendingRequest(null);
   }
@@ -164,7 +506,9 @@ export function App() {
   }
 
   function revokeGrant(grantId: string) {
-    setGrants((items) => items.map((grant) => grant.grantId === grantId ? { ...grant, revokedAt: new Date().toISOString() } : grant));
+    const nextGrants = grantsRef.current.map((grant) => grant.grantId === grantId ? { ...grant, revokedAt: new Date().toISOString() } : grant);
+    grantsRef.current = nextGrants;
+    setGrants(nextGrants);
     setAudit((items) => [`Mini Passport revoked: ${grantId}`, ...items]);
   }
 
@@ -192,21 +536,60 @@ export function App() {
           {workspace ? <>
             <p className="goal">{workspace.goal}</p>
             <div className="sections">{workspace.sections.map((section) => <article key={section.id}><span>{section.provider}</span><h4>{section.title}</h4><p>{section.description}</p><small>{section.status ?? "idle"}</small></article>)}</div>
+            {workspace.constraints?.length ? <fieldset className="constraints" data-testid="canvas-constraints">
+              <legend><span>Task constraints</span><small>human-controlled state</small></legend>
+              <div className="constraintList">{workspace.constraints.map((constraint) => {
+                const inputId = `constraint-${constraint.id}`;
+                return <div className="constraint" key={constraint.id}>
+                  <label htmlFor={inputId}><strong>{constraint.label}</strong><small>{constraint.unit ?? constraint.type}</small></label>
+                  <div className="constraintValue">
+                    {constraint.type === "boolean"
+                      ? <input id={inputId} type="checkbox" checked={constraint.value === true} onChange={(event) => updateConstraint(constraint.id, event.target.checked)} />
+                      : <><input id={inputId} type={constraint.type === "number" ? "number" : "text"} value={String(constraint.value)} onChange={(event) => updateConstraint(constraint.id, constraint.type === "number" ? Number(event.target.value) : event.target.value)} />{constraint.unit && <span>{constraint.unit}</span>}</>}
+                  </div>
+                </div>;
+              })}</div>
+            </fieldset> : null}
           </> : <div className="empty">Ask your agent to compose a workspace from the available WebMCP capabilities.</div>}
         </section>
       </div>
 
+      <section className="panel capabilityPanel" data-testid="capability-graph">
+        <div className="panelHead">
+          <div><span className="eyebrow">CAPABILITY GRAPH</span><h3>Live web capabilities</h3></div>
+          <span className={`pill graphStatus ${discoveryState}`} data-testid="capability-count">
+            {discoveryState === "loading" ? "Discovering…" : discoveryState === "ready" ? `${capabilities.length} tools live` : discoveryState === "error" ? "Discovery error" : "WebMCP unavailable"}
+          </span>
+        </div>
+        <p className="graphIntro">Normalized from <code>getTools({"{ fromOrigins }"})</code> and refreshed on <code>toolchange</code>.</p>
+        {discoveryError && <p className="graphError">{discoveryError}</p>}
+        <div className="capabilityGroups">
+          {capabilityGroups.map((group) => <article className="capabilityGroup" key={group.origin} data-origin={group.origin}>
+            <div className="originHead">
+              <div className="originIdentity"><span className="originMark" aria-hidden="true" /><div><strong>{group.label}</strong><code>{group.origin}</code></div></div>
+              <span className="originCount">{group.tools.length} {group.tools.length === 1 ? "tool" : "tools"}</span>
+            </div>
+            {group.tools.length ? <div className="capabilityList">{group.tools.map((tool) => <div className="capability" key={`${group.origin}-${tool.name}`}>
+              <div className="capabilityTitle"><code>{tool.name}</code><span>{tool.annotations?.readOnlyHint ? "READ ONLY" : "ACTION"}</span></div>
+              <strong>{tool.title ?? tool.name}</strong>
+              <p>{tool.description}</p>
+              <small>Inputs: {schemaParameterNames(tool)}</small>
+            </div>)}</div> : <p className="graphEmpty">{discoveryState === "unsupported" ? "WebMCP is unavailable in this browser." : "Waiting for this origin to expose tools…"}</p>}
+          </article>)}
+        </div>
+      </section>
+
       <section className="panel providers">
         <div className="panelHead"><div><span className="eyebrow">INDEPENDENT ORIGINS</span><h3>Capability providers</h3></div><span className="pill">iframe allow="tools"</span></div>
         <div className="frames">
-          {Object.entries(providerOrigins).map(([name, origin]) => <iframe key={name} title={`${name} provider`} src={origin} allow="tools" />)}
+          {Object.entries(providerOrigins).map(([name, origin]) => <iframe key={name} title={`${name} provider`} src={origin} allow="tools" onLoad={() => capabilityRefreshRef.current?.()} />)}
         </div>
       </section>
 
       <div className="grid lower">
         <section className="panel">
           <div className="panelHead"><div><span className="eyebrow">MINI PASSPORTS</span><h3>Active grants</h3></div></div>
-          {activeGrants.length ? activeGrants.map((grant) => <div className="grant" key={grant.grantId}><div><strong>{grant.mode.toUpperCase()} · {grant.audience}</strong><small>{grant.claimIds.join(" · ")}</small><small>expires {new Date(grant.expiresAt).toLocaleTimeString()}</small></div><button onClick={() => revokeGrant(grant.grantId)}>Revoke</button></div>) : <div className="empty compact">No active grants.</div>}
+          {activeGrants.length ? activeGrants.map((grant) => <div className="grant" key={grant.grantId}><div><strong>{grantModeLabel(grant.mode)} · {grant.audience}</strong><small>{grant.claimIds.join(" · ")}</small><small>expires {new Date(grant.expiresAt).toLocaleTimeString()}</small></div><button onClick={() => revokeGrant(grant.grantId)}>Revoke</button></div>) : <div className="empty compact">No active grants.</div>}
         </section>
         <section className="panel">
           <div className="panelHead"><div><span className="eyebrow">AUDIT</span><h3>Human-agent state</h3></div></div>
@@ -214,7 +597,26 @@ export function App() {
         </section>
       </div>
 
-      {pendingRequest && <div className="scrim" role="presentation"><section className="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title"><span className="eyebrow">MINI PASSPORT REQUEST</span><h3 id="consent-title">Your agent is asking for context</h3><p>{pendingRequest.purpose}</p><div className="consentClaims">{pendingRequest.claimIds.map((id) => <div key={id}>{demoClaimDescriptors.find((claim) => claim.id === id)?.label ?? id}</div>)}</div><dl><div><dt>Audience</dt><dd>{pendingRequest.audience}</dd></div><div><dt>Mode</dt><dd>{pendingRequest.mode}</dd></div><div><dt>Duration</dt><dd>{pendingRequest.durationSeconds}s</dd></div></dl><div className="actions"><button className="secondary" onClick={denyRequest}>Deny</button><button onClick={approveRequest}>Approve Mini Passport</button></div></section></div>}
+      {pendingRequest && <div className="scrim" role="presentation"><section className="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+        <span className="eyebrow">MINI PASSPORT REQUEST</span>
+        <h3 id="consent-title">Your agent is asking for context</h3>
+        <p className="consentPurpose">{pendingRequest.purpose}</p>
+        <fieldset className="consentClaims">
+          <legend>Requested claims <small>Select only what this task needs.</small></legend>
+          {demoClaimDescriptors.filter((claim) => pendingRequest.claimIds.includes(claim.id)).map((claim) => <label key={claim.id}>
+            <input type="checkbox" checked={pendingRequest.claimIds.includes(claim.id)} onChange={() => setPendingRequest((request) => request ? updatePendingClaim(request, claim.id) : request)} />
+            <span><strong>{claim.label}</strong><small>{claim.id}</small></span>
+            <em>{claim.sensitivity}</em>
+          </label>)}
+        </fieldset>
+        <div className="consentControlGrid">
+          <label>Audience<input type="text" value={pendingRequest.audience} onChange={(event) => setPendingRequest((request) => request ? { ...request, audience: event.target.value } : request)} /></label>
+          <label>Mode<select value={pendingRequest.mode} onChange={(event) => setPendingRequest((request) => request ? { ...request, mode: event.target.value as GrantRequest["mode"] } : request)}><option value="reveal">Reveal (agent sees value)</option><option value="use">Use (no reveal)</option><option value="prove">Prove (predicate only)</option></select></label>
+          <label>Duration<input type="number" min="30" max="3600" step="1" value={pendingRequest.durationSeconds} onChange={(event) => setPendingRequest((request) => request ? { ...request, durationSeconds: Number(event.target.value) } : request)} /><small>30–3600 seconds</small></label>
+        </div>
+        <p className="consentHint">{pendingRequest.mode === "reveal" ? "The agent can read selected values while this grant is active." : pendingRequest.mode === "use" ? "The provider can use the selected value; the agent receives only an opaque handle." : "The provider receives only a predicate result, never the selected value."}</p>
+        <div className="actions"><button className="secondary" onClick={denyRequest}>Deny</button><button disabled={!canApproveRequest(pendingRequest)} onClick={approveRequest}>Approve Mini Passport</button></div>
+      </section></div>}
     </main>
   );
 }
