@@ -1,0 +1,10 @@
+{
+  "date": "2026-08-26",
+  "model": "openai-codex/gpt-5.6-sol",
+  "browser": "Chrome 150.0.0.0",
+  "command": "pnpm test:evals",
+  "cases": 25,
+  "groups": 5,
+  "result": "pass",
+  "scope": "deterministic dataset structure, tool schemas, privacy expectations, and adversarial coverage"
+}

@@ -83,7 +83,7 @@ const housing: ProviderDefinition = {
       title: "Search housing",
       description: "Searches available Tokyo housing by monthly budget, furnished preference, and maximum commute time.",
       inputSchema: { type: "object", required: ["maxMonthlyRent"], properties: { maxMonthlyRent: { type: "number" }, furnished: { type: "boolean" }, maxCommuteMinutes: { type: "integer" } }, additionalProperties: false },
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
       execute: async (input) => event("housing_search", { results: [
         { id: "home_kichijoji", area: "Kichijoji", monthlyRent: Math.min(Number(input.maxMonthlyRent), 168000), furnished: true, commuteMinutes: 31 },
         { id: "home_koenji", area: "Koenji", monthlyRent: Math.min(Number(input.maxMonthlyRent), 151000), furnished: true, commuteMinutes: 27 },

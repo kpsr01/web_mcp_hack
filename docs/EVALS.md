@@ -90,3 +90,16 @@ Commit at least 25 eval cases by Phase 4:
 - 5 failure/adversarial cases.
 
 Record model/browser/version and date when reporting scores because WebMCP clients are experimental and behavior may change.
+
+## Committed dataset and baseline
+
+`evals/cases.json` contains the 25 cases in the five groups above. Each case records its prompt, expected tool sequence, required claim IDs, parameter constraints, forbidden fields, and outcome. `evals/evals.test.mjs` checks the case count, group balance, known tools/claims, required adversarial dimensions, and absence of synthetic claim values.
+
+Run the reproducible structural baseline with:
+
+```sh
+pnpm test:evals
+```
+
+The committed baseline is in `evals/results.json`: 25 cases, 5 groups, result `pass`, recorded on 2026-08-26 with model `openai-codex/gpt-5.6-sol` and Chrome `150.0.0.0`. The result covers deterministic dataset and privacy-contract checks; the browser runtime smoke test remains a separate manual gate because WebMCP support is experimental.
+A native headless Chrome 150 run with `--enable-features=WebMCP` exposed 12 tools, confirmed descriptor-only claim listing, denied an over-broad housing grant, and approved a reduced-scope retry. Housing search metadata included `untrustedContentHint: true`; this smoke run does not infer a model score.
