@@ -1,0 +1,20 @@
+{
+  "name": "weave-webmcp",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "dev": "concurrently -n weave,housing,bank,civic -c auto \"pnpm dev:weave\" \"pnpm dev:housing\" \"pnpm dev:bank\" \"pnpm dev:civic\"",
+    "dev:weave": "pnpm --filter @weave/app dev",
+    "dev:housing": "pnpm --filter @weave/provider dev:housing",
+    "dev:bank": "pnpm --filter @weave/provider dev:bank",
+    "dev:civic": "pnpm --filter @weave/provider dev:civic",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0",
+    "typescript": "^5.9.0"
+  }
+}

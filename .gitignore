@@ -1,0 +1,11 @@
+node_modules
+.DS_Store
+dist
+.vite
+coverage
+.env
+.env.local
+.env.*.local
+*.log
+.vercel
+.netlify
