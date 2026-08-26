@@ -2,7 +2,7 @@
 
 The public demo video must stay under three minutes. The goal is not to explain every feature; it is to make judges understand the new web primitive immediately.
 
-## Canonical 2:45 storyboard
+## Canonical sub-three-minute storyboard
 
 ### 0:00–0:15 — Thesis
 
@@ -67,14 +67,14 @@ Use four short sections matching judge vocabulary exactly:
 
 ## Judge test path
 
-README should eventually include a 60-second manual test:
+The 60-second manual test is also included in [README.md](../README.md) and the full submission copy is in [SUBMISSION.md](SUBMISSION.md):
 
-1. Open live WEAVE URL in supported browser.
-2. Reset demo.
-3. Ask agent to list available Passport claims.
-4. Ask it to create Tokyo setup workspace.
-5. Ask it to personalize workspace.
-6. Approve Mini Passport.
+1. Open the live WEAVE URL in a supported browser.
+2. Reset the demo.
+3. Ask the agent to list available Passport claims.
+4. Ask it to create the Tokyo setup workspace.
+5. Ask it to personalize the workspace.
+6. Edit and approve the minimum Mini Passport.
 7. Revoke and retry a protected action.
 
 No account creation should be required for judges.

@@ -39,6 +39,13 @@ Development uses four origins:
 - Bank `localhost:3102`
 - Civic `localhost:3103`
 
+The public deployment uses the same four-origin topology:
+
+- WEAVE `https://weave-webmcp-kpsr01.vercel.app`
+- Housing `https://weave-housing-kpsr01.vercel.app`
+- Bank `https://weave-bank-kpsr01.vercel.app`
+- Civic `https://weave-civic-kpsr01.vercel.app`
+
 `apps/provider` is one codebase run/deployed three times with different `VITE_PROVIDER_KIND` values. This proves that composition is based on WebMCP capability exposure rather than hard-coded same-origin function imports.
 
 ## Cross-origin WebMCP
@@ -52,7 +59,11 @@ await document.modelContext.registerTool(tool, {
 });
 ```
 
-WEAVE embeds provider pages with `allow="tools"`. The top-level deployment must configure the `tools` Permissions Policy for the exact provider origins. Local Vite configuration supplies development headers; production headers must be updated once final domains are known.
+WEAVE embeds provider pages with `allow="tools"`. The top-level deployment delegates the `tools` Permissions Policy to the exact provider origins in both development and production:
+
+```text
+tools=(self "https://weave-housing-kpsr01.vercel.app" "https://weave-bank-kpsr01.vercel.app" "https://weave-civic-kpsr01.vercel.app")
+```
 
 The current WebMCP draft defines `exposedTo`, origin-filtered `getTools({ fromOrigins })`, `toolchange`, `readOnlyHint`, `untrustedContentHint`, and abort signals. Do not invent unsupported browser APIs.
 
