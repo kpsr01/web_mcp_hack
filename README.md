@@ -64,9 +64,23 @@ Local origins:
 
 The provider apps are deliberately separate origins. Each registers WebMCP tools with `exposedTo: [WEAVE_ORIGIN]`; WEAVE embeds them with the `tools` permission so cross-origin capability discovery can be exercised.
 
+## Judge demo
+
+Open the production WEAVE URL in ChatGPT's built-in browser or Chrome with WebMCP testing enabled:
+
+`https://weave-webmcp-kpsr01.vercel.app`
+
+Ask: **“Set me up to live in Tokyo.”** Approve only the claims needed for the current step, then use **Reset demo** to restore the synthetic identity between runs.
+
+Production provider origins:
+
+- Housing: `https://weave-housing-kpsr01.vercel.app`
+- Bank: `https://weave-bank-kpsr01.vercel.app`
+- Civic: `https://weave-civic-kpsr01.vercel.app`
+
 ## Current phase
 
-Phase 1 is complete: WEAVE discovers cross-origin WebMCP capabilities, renders the live Capability Graph, and composes an editable typed Canvas. See [docs/ROADMAP.md](docs/ROADMAP.md) for the next phase gate.
+Phase 5 is complete: the judge-facing WEAVE and provider origins are deployed, the consent surface is keyboard-accessible, grants can be revoked immediately, and demo reset is deterministic. See [docs/ROADMAP.md](docs/ROADMAP.md) for the next phase gate.
 
 ## Hackathon constraints baked into the plan
 

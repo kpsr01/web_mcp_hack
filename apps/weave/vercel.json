@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Origin-Agent-Cluster", "value": "?1" },
+        {
+          "key": "Permissions-Policy",
+          "value": "tools=(self \"https://weave-housing-kpsr01.vercel.app\" \"https://weave-bank-kpsr01.vercel.app\" \"https://weave-civic-kpsr01.vercel.app\")"
+        }
+      ]
+    }
+  ]
+}

@@ -37,6 +37,16 @@ function loadClaimValues(): Record<string, unknown> {
 }
 
 const demoClaimValues = loadClaimValues();
+export function resetDemoPassport(): void {
+  for (const claimId of Object.keys(demoClaimValues)) delete demoClaimValues[claimId];
+  Object.assign(demoClaimValues, syntheticClaimValues);
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(passportStorageKey, JSON.stringify(syntheticClaimValues));
+  } catch {
+    // Private browsing or blocked storage still keeps the in-memory demo vault.
+  }
+}
 
 function readDemoClaimValue(claimId: string): unknown {
   return demoClaimValues[claimId];

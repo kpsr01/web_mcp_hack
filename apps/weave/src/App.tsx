@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { authorizeOpaqueClaim, createGrant, demoClaimDescriptors, issueOpaqueClaimHandles, isGrantActive, readGrantedClaim } from "@weave/passport";
+import { authorizeOpaqueClaim, createGrant, demoClaimDescriptors, issueOpaqueClaimHandles, isGrantActive, readGrantedClaim, resetDemoPassport } from "@weave/passport";
 import type { OpaqueClaimHandle } from "@weave/passport";
 import type { ClaimPredicate, GrantRequest, MiniPassportGrant, ProviderKind, WorkspaceManifest } from "@weave/protocol";
 import { executeWebMCPTool, getWebMCPTools, hasWebMCP, registerWebMCPTool, subscribeWebMCPToolChanges } from "@weave/webmcp";
@@ -41,19 +41,24 @@ function isGrantMode(value: unknown): value is GrantRequest["mode"] {
   return value === "reveal" || value === "use" || value === "prove";
 }
 
-function isGrantRequestShapeValid(request: GrantRequest): boolean {
-  return request.claimIds.length > 0
-    && Boolean(request.purpose.trim())
-    && Boolean(request.audience.trim())
-    && isGrantMode(request.mode)
-    && Number.isInteger(request.durationSeconds)
-    && request.durationSeconds >= 30
-    && request.durationSeconds <= 3600;
+function grantRequestValidationMessage(request: GrantRequest): string | null {
+  if (!request.claimIds.length) return "Select at least one claim.";
+  if (!request.purpose.trim()) return "Add a purpose so the human can assess this request.";
+  if (!request.audience.trim()) return "Add an audience scope before approving.";
+  if (!isGrantMode(request.mode)) return "Choose a valid grant mode.";
+  if (!Number.isInteger(request.durationSeconds) || request.durationSeconds < 30 || request.durationSeconds > 3600) {
+    return "Choose a duration between 30 and 3600 seconds.";
+  }
+  const unsupportedClaims = demoClaimDescriptors.filter((claim) =>
+    request.claimIds.includes(claim.id) && !claim.allowedModes.includes(request.mode),
+  );
+  return unsupportedClaims.length
+    ? `${unsupportedClaims.map((claim) => claim.label).join(", ")} cannot be shared in ${request.mode} mode.`
+    : null;
 }
 
 function canApproveRequest(request: GrantRequest): boolean {
-  return isGrantRequestShapeValid(request)
-    && request.claimIds.every((id) => demoClaimDescriptors.some((claim) => claim.id === id && claim.allowedModes.includes(request.mode)));
+  return grantRequestValidationMessage(request) === null;
 }
 
 function normalizePredicate(value: unknown): ClaimPredicate | undefined {
@@ -91,13 +96,25 @@ export function App() {
   const [pendingRequest, setPendingRequest] = useState<GrantRequest | null>(null);
   const [grants, setGrants] = useState<MiniPassportGrant[]>([]);
   const [audit, setAudit] = useState<string[]>([]);
+  const [canvasRevision, setCanvasRevision] = useState(0);
   const resolverRef = useRef<GrantResolver | null>(null);
   const workspaceRef = useRef<WorkspaceManifest | null>(workspace);
   const capabilityRefreshRef = useRef<(() => void) | null>(null);
   const grantsRef = useRef(grants);
   const opaqueHandlesRef = useRef<OpaqueClaimHandle[]>([]);
+  const consentRef = useRef<HTMLDialogElement | null>(null);
+  const requestedClaimIdsRef = useRef<string[]>([]);
 
   useEffect(() => { workspaceRef.current = workspace; }, [workspace]);
+  useEffect(() => {
+    const dialog = consentRef.current;
+    if (!dialog || !pendingRequest) return;
+    if (!dialog.open) dialog.showModal();
+    dialog.querySelector<HTMLInputElement>("input[type='checkbox']")?.focus();
+    return () => {
+      if (dialog.open) dialog.close();
+    };
+  }, [pendingRequest?.requestId]);
 
   useEffect(() => {
     const providersByOrigin = new Map<string, ProviderKind>(
@@ -241,6 +258,7 @@ export function App() {
           if (!manifest) return { status: "rejected", code: "INVALID_WORKSPACE_MANIFEST" };
           workspaceRef.current = manifest;
           setWorkspace(manifest);
+          setCanvasRevision((revision) => revision + 1);
           setAudit((items) => [`Workspace composed: ${manifest.title}`, ...items]);
           return { status: "created", workspaceId: manifest.id, sectionCount: manifest.sections.length, constraints: manifest.constraints };
         },
@@ -275,7 +293,8 @@ export function App() {
             mode: input.mode as GrantRequest["mode"],
             durationSeconds: Number(input.durationSeconds),
           };
-          if (!isGrantRequestShapeValid(request)) return { status: "rejected", code: "INVALID_GRANT_REQUEST" };
+          if (grantRequestValidationMessage(request)) return { status: "rejected", code: "INVALID_GRANT_REQUEST" };
+          requestedClaimIdsRef.current = validIds;
           setPendingRequest(request);
           setAudit((items) => [`Consent requested: ${validIds.join(", ")}`, ...items]);
           return new Promise<Record<string, unknown>>((resolve) => { resolverRef.current = resolve; });
@@ -406,6 +425,7 @@ export function App() {
   }, [capabilities]);
 
   const activeGrants = useMemo(() => grants.filter((grant) => isGrantActive(grant)), [grants]);
+  const consentIssue = pendingRequest ? grantRequestValidationMessage(pendingRequest) : null;
 
   function updateConstraint(id: string, value: string | number | boolean) {
     const current = workspaceRef.current;
@@ -435,6 +455,7 @@ export function App() {
       ...(handles.length ? { claimHandles: handles.map((handle) => handle.handleId) } : {}),
     });
     resolverRef.current = null;
+    requestedClaimIdsRef.current = [];
     setPendingRequest(null);
   }
 
@@ -443,6 +464,7 @@ export function App() {
     setAudit((items) => [`Consent denied: ${pendingRequest.claimIds.join(", ")}`, ...items]);
     resolverRef.current({ status: "denied", requestId: pendingRequest.requestId });
     resolverRef.current = null;
+    requestedClaimIdsRef.current = [];
     setPendingRequest(null);
   }
 
@@ -452,12 +474,24 @@ export function App() {
     setGrants(nextGrants);
     setAudit((items) => [`Mini Passport revoked: ${grantId}`, ...items]);
   }
+  function resetDemo() {
+    if (resolverRef.current && pendingRequest) {
+      resolverRef.current({ status: "denied", requestId: pendingRequest.requestId, code: "DEMO_RESET" });
+      resolverRef.current = null;
+    }
+    resetDemoPassport();
+    window.location.reload();
+  }
 
   return (
-    <main>
+    <>
+      <main>
       <header className="topbar">
-        <div><span className="eyebrow">WEBMCP CHALLENGE</span><h1>WEAVE</h1></div>
-        <div className={`status ${hasWebMCP() ? "ok" : "warn"}`}>{hasWebMCP() ? "WebMCP available" : "WebMCP unavailable"}</div>
+        <div><span className="eyebrow">WEBMCP CHALLENGE</span><h1>WEAVE</h1><p className="demoIdentity">Synthetic demo identity · 7 private claims</p></div>
+        <div className="topbarActions">
+          <div className={`status ${hasWebMCP() ? "ok" : "warn"}`} role="status" aria-live="polite">{hasWebMCP() ? "WebMCP available" : "WebMCP needs a supported browser"}</div>
+          <button className="resetButton" type="button" onClick={resetDemo}>Reset demo</button>
+        </div>
       </header>
 
       <section className="hero">
@@ -472,7 +506,7 @@ export function App() {
           <div className="claims">{demoClaimDescriptors.map((claim) => <div className="claim" key={claim.id}><div><strong>{claim.label}</strong><small>{claim.id}</small></div><span>{claim.sensitivity}</span></div>)}</div>
         </section>
 
-        <section className="panel canvas">
+        <section className={`panel canvas ${workspace ? "canvasReady" : ""}`} key={canvasRevision}>
           <div className="panelHead"><div><span className="eyebrow">WEAVE CANVAS</span><h3>{workspace?.title ?? "No temporary app yet"}</h3></div><span className="pill">agent-generated manifest</span></div>
           {workspace ? <>
             <p className="goal">{workspace.goal}</p>
@@ -504,6 +538,15 @@ export function App() {
         </div>
         <p className="graphIntro">Normalized from <code>getTools({"{ fromOrigins }"})</code> and refreshed on <code>toolchange</code>.</p>
         {discoveryError && <p className="graphError">{discoveryError}</p>}
+        {discoveryState === "unsupported" && <aside className="browserHelp" aria-labelledby="browser-help-title">
+          <strong id="browser-help-title">Turn on WebMCP to run the live demo</strong>
+          <p>Use ChatGPT’s built-in browser, or Chrome with WebMCP testing enabled, then reload this page.</p>
+          <ol>
+            <li>Open this URL in one of those supported browsers.</li>
+            <li>Reload until the status shows live tools.</li>
+          </ol>
+          <code>Chrome flag: --enable-features=WebMCP</code>
+        </aside>}
         <div className="capabilityGroups">
           {capabilityGroups.map((group) => <article className="capabilityGroup" key={group.origin} data-origin={group.origin}>
             <div className="originHead">
@@ -538,13 +581,14 @@ export function App() {
         </section>
       </div>
 
-      {pendingRequest && <div className="scrim" role="presentation"><section className="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+    </main>
+      {pendingRequest && <dialog className="consent consentDialog" ref={consentRef} aria-labelledby="consent-title" aria-describedby="consent-purpose consent-validation" onCancel={(event) => { event.preventDefault(); denyRequest(); }}>
         <span className="eyebrow">MINI PASSPORT REQUEST</span>
         <h3 id="consent-title">Your agent is asking for context</h3>
-        <p className="consentPurpose">{pendingRequest.purpose}</p>
+        <p className="consentPurpose" id="consent-purpose">{pendingRequest.purpose}</p>
         <fieldset className="consentClaims">
           <legend>Requested claims <small>Select only what this task needs.</small></legend>
-          {demoClaimDescriptors.filter((claim) => pendingRequest.claimIds.includes(claim.id)).map((claim) => <label key={claim.id}>
+          {demoClaimDescriptors.filter((claim) => requestedClaimIdsRef.current.includes(claim.id)).map((claim) => <label key={claim.id}>
             <input type="checkbox" checked={pendingRequest.claimIds.includes(claim.id)} onChange={() => setPendingRequest((request) => request ? updatePendingClaim(request, claim.id) : request)} />
             <span><strong>{claim.label}</strong><small>{claim.id}</small></span>
             <em>{claim.sensitivity}</em>
@@ -555,9 +599,10 @@ export function App() {
           <label>Mode<select value={pendingRequest.mode} onChange={(event) => setPendingRequest((request) => request ? { ...request, mode: event.target.value as GrantRequest["mode"] } : request)}><option value="reveal">Reveal (agent sees value)</option><option value="use">Use (no reveal)</option><option value="prove">Prove (predicate only)</option></select></label>
           <label>Duration<input type="number" min="30" max="3600" step="1" value={pendingRequest.durationSeconds} onChange={(event) => setPendingRequest((request) => request ? { ...request, durationSeconds: Number(event.target.value) } : request)} /><small>30–3600 seconds</small></label>
         </div>
-        <p className="consentHint">{pendingRequest.mode === "reveal" ? "The agent can read selected values while this grant is active." : pendingRequest.mode === "use" ? "The provider can use the selected value; the agent receives only an opaque handle." : "The provider receives only a predicate result, never the selected value."}</p>
-        <div className="actions"><button className="secondary" onClick={denyRequest}>Deny</button><button disabled={!canApproveRequest(pendingRequest)} onClick={approveRequest}>Approve Mini Passport</button></div>
-      </section></div>}
-    </main>
+        <p className="consentHint" id="consent-mode-hint">{pendingRequest.mode === "reveal" ? "The agent can read selected values while this grant is active." : pendingRequest.mode === "use" ? "The provider can use the selected value; the agent receives only an opaque handle." : "The provider receives only a predicate result, never the selected value."}</p>
+        <p className={`consentValidation ${consentIssue ? "invalid" : "valid"}`} id="consent-validation" role="status" aria-live="polite">{consentIssue ?? "All selected claims fit this grant scope."}</p>
+        <div className="actions"><button className="secondary" type="button" onClick={denyRequest}>Deny</button><button type="button" disabled={Boolean(consentIssue)} onClick={approveRequest}>Approve Mini Passport</button></div>
+      </dialog>}
+    </>
   );
 }
