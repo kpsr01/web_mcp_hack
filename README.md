@@ -40,6 +40,7 @@ docs/
   SECURITY.md
   EVALS.md
   DEMO.md
+  SUBMISSION.md
 ```
 
 ## Local development
@@ -48,7 +49,7 @@ Prerequisites:
 
 - Node.js 22+
 - pnpm 10+
-- Chrome with `chrome://flags/#enable-webmcp-testing` enabled, or ChatGPT's built-in browser for deployed testing
+- Chrome with `chrome://flags/#enable-webmcp-testing` enabled for local WebMCP calls
 
 ```bash
 pnpm install
@@ -64,6 +65,16 @@ Local origins:
 
 The provider apps are deliberately separate origins. Each registers WebMCP tools with `exposedTo: [WEAVE_ORIGIN]`; WEAVE embeds them with the `tools` permission so cross-origin capability discovery can be exercised.
 
+## Verify
+
+```bash
+pnpm test
+pnpm typecheck
+pnpm build
+```
+
+`pnpm test` includes the 25-case structural eval baseline in `evals/`. WebMCP runtime behavior requires a supported browser; use the production smoke record in [docs/SUBMISSION.md](docs/SUBMISSION.md) for the canonical flow evidence.
+
 ## Judge demo
 
 Open the production WEAVE URL in ChatGPT's built-in browser or Chrome with WebMCP testing enabled:
@@ -78,9 +89,11 @@ Production provider origins:
 - Bank: `https://weave-bank-kpsr01.vercel.app`
 - Civic: `https://weave-civic-kpsr01.vercel.app`
 
+The complete submission copy, two-minute-forty-nine-second narrated demo, architecture, tool inventory, and 60-second judge path are in [docs/SUBMISSION.md](docs/SUBMISSION.md).
+
 ## Current phase
 
-Phase 5 is complete: the judge-facing WEAVE and provider origins are deployed, the consent surface is keyboard-accessible, grants can be revoked immediately, and demo reset is deterministic. See [docs/ROADMAP.md](docs/ROADMAP.md) for the next phase gate.
+Phase 6 is complete: the public submission package includes the live demo, reproducible judge path, four-criteria description, architecture/tool inventory, and final production smoke evidence. See [docs/ROADMAP.md](docs/ROADMAP.md) for later scope, which is intentionally not started.
 
 ## Hackathon constraints baked into the plan
 
@@ -88,9 +101,10 @@ Phase 5 is complete: the judge-facing WEAVE and provider origins are deployed, t
 - Public source repository
 - Open-source license
 - Real `document.modelContext.registerTool(...)` implementation
-- Sub-3-minute narrated demo
-- Tested in ChatGPT's built-in browser and Chrome WebMCP mode
+- Sub-three-minute narrated demo
+- Chrome WebMCP runtime smoke coverage
 - Evals covering tool choice, parameters, sequencing, privacy, and recovery
+
 
 ## Source material
 
